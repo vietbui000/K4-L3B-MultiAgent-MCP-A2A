@@ -1,4 +1,60 @@
-# TV1 — Hướng dẫn tích hợp
+# Cập nhật adapter SDK và input thật — 2026-09-25
+
+- SDK MCP hiện tại dùng `input_schema`, `next_cursor`, `is_error`,
+  `structured_content`. Gateway ưu tiên các field này, hỗ trợ alias camelCase
+  cho object SDK cũ; test dùng model thật của SDK để tránh mock che lỗi.
+- Entity đọc thêm `customer_request.claimed_order_id` và
+  `customer_unique_id_hint`. Customer history thật trả `orders`; agent nối
+  order_id/customer_id với lịch sử có customer_unique_id đã xác minh, không
+  thay thế customer_unique_id bằng customer_id.
+- Claimed ID chỉ được chọn sau kiểm chứng order/customer; nhiều candidate được
+  xác nhận vẫn ambiguous. Tool lỗi chung không làm candidate trở thành rejected.
+- Discovery thật đọc được 10 tool. Entity case `L3B_CASE_001` đã resolved qua
+  MCP thật với 3 calls, 2 evidence được consume. Đây là kiểm tra Entity riêng,
+  chưa phải chạy toàn bộ workflow hoặc tạo submission.
+- Ruff pass; pytest **52 passed, 1 failed**: test repo phát hành không cho input
+  thất bại vì workspace hiện đã có case-set và 100 input hợp lệ. Không xóa input
+  hoặc thay test để che điều kiện này.
+- Đã sửa Order Agent gọi `get_product_context` và `get_sellers` bằng `order_id`,
+  mỗi tool một lần cho mỗi đơn đã resolve, không phụ thuộc ID trong items.
+  MCP thật case 001 xác nhận cả hai call thành công và trả danh sách; parser
+  đã nhận danh sách product/seller. Test dùng schema order_id và response list,
+  kiểm tra nhiều đơn, scope trùng và tắt product context. Bộ test order/regression:
+  26 passed, Ruff pass. Chưa chạy toàn bộ workflow 100 case.
+
+Các ghi chú thiếu input/shape phẳng phía dưới là lịch sử bàn giao trước cập nhật này.
+
+---
+
+# Cập nhật sau review — 2026-09-25
+
+Hiện đã có đủ bốn specialist. Hướng dẫn ban đầu bên dưới mô tả trạng thái lúc TV1
+bàn giao; ghi chú thiếu module không còn áp dụng.
+
+- Đã sửa tính trùng capture/refund giữa các nguồn, giữ số tiền chưa biết khi
+  thiếu amount/identity hoặc tool lỗi; chặn hoàn tiếp khi refund pending/failed.
+- Shipment giữ deadline theo order, không quy lỗi logistics khi thiếu bằng chứng
+  seller; nhiều shipment chưa ánh xạ được seller sẽ giữ insufficient_evidence.
+- Policy giữ conflict từ mọi specialist, chưa chọn nguồn khi thiếu quy tắc đã
+  xác minh; lost/returned yêu cầu điều tra. Chỉ xác nhận split khi nhiều capture
+  khớp `total_brl` của một order trong adapter hiện tại.
+- Verifier gọi business checks, kiểm tra tiền/refund trùng/conflict. Case không
+  có identifier có thể xuất not_found với refs rỗng đúng schema; resolved vẫn
+  bắt buộc evidence. Pass schema không đảm bảo điểm evidence.
+- Sửa test thiếu module bằng mock; thêm regression test và tích hợp specialist
+  thật với gateway giả. **Ruff pass; toàn bộ pytest: 44 passed.** Trên máy này
+  pytest cần quyền thư mục tạm ngoài sandbox để tránh WinError 5.
+
+**Chưa kiểm chứng MCP thật:** workspace thiếu `case-set.json`; validate-inputs
+đã báo FileNotFoundError rõ ràng. Chưa chạy 100 case, validate output thật/package.
+Adapter field cần đối chiếu response thật. Policy hiện hiểu `refund_full` boolean
+cho một order, chưa tự phân bổ refund nhiều order hoặc đoán source precedence.
+Lịch sử trạng thái chưa đủ xác định trạng thái cuối được xử lý bảo thủ. Entity
+vẫn hỗ trợ shape phẳng, chưa ranking theo amount/time/item.
+
+---
+
+# TV1 — Hướng dẫn tích hợp ban đầu
 
 ## Đã triển khai
 

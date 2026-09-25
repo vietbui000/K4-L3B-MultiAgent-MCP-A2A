@@ -1,0 +1,10 @@
+ TV1_HANDOFF.md                          |  87 [32m++++++++++[m
+ src/student_agent/a2a.py                |  48 [32m++++++[m
+ src/student_agent/agents/__init__.py    |   1 [32m+[m
+ src/student_agent/agents/entity.py      |  81 [32m+++++++++[m
+ src/student_agent/agents/verifier.py    |  46 [32m++++++[m
+ src/student_agent/evidence_collector.py | 111 [32m+++++++++++++[m
+ src/student_agent/mcp_gateway.py        |  23 [32m++[m[31m-[m
+ src/student_agent/workflow.py           | 131 [32m++++++++++++++[m[31m-[m
+ tests/test_workflow_tv1.py              | 284 [32m++++++++++++++++++++++++++++++++[m
+ 9 files changed, 802 insertions(+), 10 deletions(-)

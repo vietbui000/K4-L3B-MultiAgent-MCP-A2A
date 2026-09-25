@@ -88,9 +88,11 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 consumed_refs.append(ref)
                 s_data = ship_resp.get("data")
                 if isinstance(s_data, dict):
-                    shipment_summaries.append(s_data)
+                    shipment_summaries.append({**s_data, "_order_id": order_id})
                 elif isinstance(s_data, list):
-                    shipment_summaries.extend([s for s in s_data if isinstance(s, dict)])
+                    shipment_summaries.extend(
+                        {**s, "_order_id": order_id} for s in s_data if isinstance(s, dict)
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to get_shipment_summary for {order_id}: {exc}")
 
@@ -102,12 +104,16 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 ref = items_resp["evidence_ref"]
                 collector.consume(task.recipient, [ref])
                 consumed_refs.append(ref)
-                all_items.extend(_extract_items(items_resp.get("data")))
+                all_items.extend(
+                    {**item, "_order_id": order_id}
+                    for item in _extract_items(items_resp.get("data"))
+                )
             except Exception as exc:
                 logger.warning(f"Failed to get_order_items for {order_id}: {exc}")
 
     # 2. Extract seller shipping limits from order items
-    seller_limits: dict[str, list[datetime]] = {}
+    seller_limits: dict[tuple[str, str], list[datetime]] = {}
+    incomplete_orders: set[str] = set()
     for it in all_items:
         sid = it.get("seller_id")
         if sid:
@@ -116,7 +122,11 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 it.get("shipping_limit_date") or it.get("order_item_shipping_limit_date")
             )
             if limit_dt:
-                seller_limits.setdefault(str(sid), []).append(limit_dt)
+                seller_limits.setdefault((it["_order_id"], str(sid)), []).append(limit_dt)
+            else:
+                incomplete_orders.add(it["_order_id"])
+        else:
+            incomplete_orders.add(it["_order_id"])
 
     # 3. Analyze timeline
     verdict = "insufficient_evidence"
@@ -132,15 +142,34 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
         is_returned = False
 
         has_valid_delivery = False
-        all_timelines_complete = True
+        all_timelines_complete = {s["_order_id"] for s in shipment_summaries} == set(
+            resolved_order_ids
+        )
+        attribution_complete = True
         delivery_is_late = False
 
         for s in shipment_summaries:
-            shipment_id = (
-                s.get("shipment_id")
-                or s.get("tracking_code")
-                or s.get("tracking_number")
+            order_id = s["_order_id"]
+            limits_for_shipment = {
+                sid: limits
+                for (oid, sid), limits in seller_limits.items()
+                if oid == order_id and (not s.get("seller_id") or sid == s["seller_id"])
+            }
+            seller_known = (
+                bool(limits_for_shipment)
+                and order_id not in incomplete_orders
+                and (
+                    bool(s.get("seller_id"))
+                    or sum(x["_order_id"] == order_id for x in shipment_summaries) == 1
+                )
             )
+            attribution_complete &= seller_known
+            all_timelines_complete &= seller_known
+            if s.get("order_id", order_id) != order_id:
+                attribution_complete = False
+                all_timelines_complete = False
+                continue
+            shipment_id = s.get("shipment_id") or s.get("tracking_code") or s.get("tracking_number")
             if shipment_id:
                 collected_shipment_ids.append(str(shipment_id))
 
@@ -169,12 +198,17 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
             # Check contradictory dates
             if carrier_dt and delivery_dt and delivery_dt < carrier_dt:
                 is_conflicting = True
-                data_conflicts.append({
-                    "field": "delivered_customer_date",
-                    "sources": ["get_shipment_summary", "carrier_tracking"],
-                    "selected_source": None,
-                    "resolution_code": "DELIVERY_BEFORE_CARRIER_HANDOFF",
-                })
+                data_conflicts.append(
+                    {
+                        "field": "delivered_customer_date",
+                        "sources": [
+                            "get_shipment_summary.delivered_customer_date",
+                            "get_shipment_summary.delivered_carrier_date",
+                        ],
+                        "selected_source": None,
+                        "resolution_code": "DELIVERY_BEFORE_CARRIER_HANDOFF",
+                    }
+                )
 
             # Check completeness of milestone dates
             if not (carrier_dt and delivery_dt and estimated_dt):
@@ -187,8 +221,8 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 delivery_is_late = True
 
             # Evaluate seller delay vs item shipping limit dates
-            if carrier_dt and seller_limits:
-                for sid, limits in seller_limits.items():
+            if carrier_dt and seller_known:
+                for sid, limits in limits_for_shipment.items():
                     earliest_limit = min(limits)
                     if carrier_dt > earliest_limit:
                         late_sellers.append(sid)
@@ -203,14 +237,14 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
             verdict = "returned"
             timeline_complete = False
         elif has_valid_delivery:
-            timeline_complete = all_timelines_complete and len(seller_limits) > 0
+            timeline_complete = all_timelines_complete
             if delivery_is_late:
-                if late_sellers:
-                    verdict = "seller_delay"
+                if not attribution_complete or not all_timelines_complete:
+                    verdict = "insufficient_evidence"
                 else:
-                    verdict = "logistics_delay"
+                    verdict = "seller_delay" if late_sellers else "logistics_delay"
             else:
-                verdict = "on_time"
+                verdict = "on_time" if all_timelines_complete else "insufficient_evidence"
         else:
             verdict = "insufficient_evidence"
             timeline_complete = False

@@ -27,7 +27,7 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
     Allowed tools: get_order, get_order_items, get_product_context, get_sellers.
     """
     case = task.payload.get("case", {})
-    resolved_order_ids = list(task.entity_scope)
+    resolved_order_ids = list(dict.fromkeys(task.entity_scope))
     consumed_refs: list[str] = []
     data_conflicts: list[dict[str, Any]] = []
 
@@ -58,7 +58,6 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
 
     raw_item_ids: list[str] = []
     raw_seller_ids: list[str] = []
-    raw_product_ids: list[str] = []
 
     scope_cfg = case.get("investigation_scope", {})
     include_product = scope_cfg.get("include_product_context", True)
@@ -73,7 +72,9 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 consumed_refs.append(ref)
                 order_data = order_resp.get("data")
                 if isinstance(order_data, dict):
-                    collected_orders.append(order_data)
+                    if order_data.get("order_id", order_id) != order_id:
+                        raise ValueError("Order evidence outside scope")
+                    collected_orders.append({**order_data, "order_id": order_id})
             except Exception as exc:
                 logger.warning(f"Failed to get_order for {order_id}: {exc}")
 
@@ -89,7 +90,9 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 items_list = _extract_items(items_resp.get("data"))
 
                 for it in items_list:
-                    collected_items.append(it)
+                    if it.get("order_id", order_id) != order_id:
+                        raise ValueError("Item evidence outside order scope")
+                    collected_items.append({**it, "order_id": order_id})
                     item_id_val = it.get("item_id")
                     if item_id_val is not None:
                         raw_item_ids.append(str(item_id_val))
@@ -102,19 +105,15 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                     if seller_id:
                         raw_seller_ids.append(str(seller_id))
 
-                    prod_id = it.get("product_id")
-                    if prod_id:
-                        raw_product_ids.append(str(prod_id))
             except Exception as exc:
                 logger.warning(f"Failed to get_order_items for {order_id}: {exc}")
 
-    # 3. Fetch product context if requested (deduplicated, bounded to budget)
+    # 3. Tools return context for an order; the shared collector enforces budget.
     if include_product and "get_product_context" in collector.tools:
-        unique_product_ids = list(dict.fromkeys(raw_product_ids))[:3]
-        for pid in unique_product_ids:
+        for order_id in resolved_order_ids:
             try:
                 prod_resp = await collector.call(
-                    task.recipient, "get_product_context", product_id=pid
+                    task.recipient, "get_product_context", order_id=order_id
                 )
                 ref = prod_resp["evidence_ref"]
                 collector.consume(task.recipient, [ref])
@@ -122,17 +121,16 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 p_data = prod_resp.get("data")
                 if isinstance(p_data, dict):
                     collected_products.append(p_data)
+                elif isinstance(p_data, list):
+                    collected_products.extend(p for p in p_data if isinstance(p, dict))
             except Exception as exc:
-                logger.warning(f"Failed to get_product_context for {pid}: {exc}")
+                logger.warning(f"Failed to get_product_context for {order_id}: {exc}")
 
-    # 4. Fetch seller details (deduplicated, bounded to budget)
+    # 4. Fetch sellers once per resolved order, even when items are unavailable.
     if "get_sellers" in collector.tools:
-        unique_seller_ids = list(dict.fromkeys(raw_seller_ids))[:3]
-        for sid in unique_seller_ids:
+        for order_id in resolved_order_ids:
             try:
-                seller_resp = await collector.call(
-                    task.recipient, "get_sellers", seller_id=sid
-                )
+                seller_resp = await collector.call(task.recipient, "get_sellers", order_id=order_id)
                 ref = seller_resp["evidence_ref"]
                 collector.consume(task.recipient, [ref])
                 consumed_refs.append(ref)
@@ -142,18 +140,22 @@ async def run(task: Task, collector: EvidenceCollector) -> Result:
                 elif isinstance(s_data, list):
                     collected_sellers.extend([s for s in s_data if isinstance(s, dict)])
             except Exception as exc:
-                logger.warning(f"Failed to get_sellers for {sid}: {exc}")
+                logger.warning(f"Failed to get_sellers for {order_id}: {exc}")
 
     # 5. Detect data conflicts / anomalies
     for o in collected_orders:
         status = o.get("order_status") or o.get("status")
-        if status == "delivered" and not collected_items:
-            data_conflicts.append({
-                "field": "order_items",
-                "sources": ["get_order", "get_order_items"],
-                "selected_source": "get_order",
-                "resolution_code": "EMPTY_ITEMS_ON_DELIVERED_ORDER",
-            })
+        if status == "delivered" and not any(
+            item["order_id"] == o["order_id"] for item in collected_items
+        ):
+            data_conflicts.append(
+                {
+                    "field": "order_items",
+                    "sources": ["get_order", "get_order_items"],
+                    "selected_source": None,
+                    "resolution_code": "EMPTY_ITEMS_ON_DELIVERED_ORDER",
+                }
+            )
 
     dedup_order_ids = list(dict.fromkeys(resolved_order_ids))[:20]
     dedup_item_ids = list(dict.fromkeys(raw_item_ids))[:20]

@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..evidence_collector import EvidenceCollector
+from .business_checks import validate_business_output
 
 
 def verify(output: dict[str, Any], collector: EvidenceCollector, entity: dict[str, Any]) -> None:
@@ -21,11 +22,14 @@ def verify(output: dict[str, Any], collector: EvidenceCollector, entity: dict[st
         raise ValueError("Output entity scope mismatch")
     refs = set(output["evidence_refs"])
     consumed = set().union(*collector.consumed.values()) if collector.consumed else set()
-    if not refs or not refs <= consumed or not refs <= collector.registry.keys():
+    if resolved and not refs:
+        raise ValueError("Resolved output requires evidence")
+    if not refs <= consumed or not refs <= collector.registry.keys():
         raise ValueError("Missing, foreign or unconsumed output evidence")
     for claim in output.get("claim_assessments", []):
         if not set(claim["evidence_refs"]) <= refs:
             raise ValueError("Claim evidence not included in output")
+    validate_business_output(output)
     financial = output["financial_resolution"]
     amount = Decimal(str(financial["recommended_refund_brl"]))
     total = sum((Decimal(str(x["amount_brl"])) for x in financial["refund_lines"]), Decimal(0))

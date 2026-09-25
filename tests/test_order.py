@@ -27,6 +27,7 @@ class MockTrace:
 class MockGateway:
     def __init__(self, responses: dict[str, dict[str, Any]] | None = None) -> None:
         self.calls = 0
+        self.requests = []
         self.responses = responses or {}
 
     async def discover_tools(self) -> dict[str, dict[str, Any]]:
@@ -40,13 +41,14 @@ class MockGateway:
             for name, arg in [
                 ("get_order", "order_id"),
                 ("get_order_items", "order_id"),
-                ("get_product_context", "product_id"),
-                ("get_sellers", "seller_id"),
+                ("get_product_context", "order_id"),
+                ("get_sellers", "order_id"),
             ]
         }
 
     async def call(self, tool: str, *, case_id: str, **args: Any) -> dict[str, Any]:
         self.calls += 1
+        self.requests.append((tool, args))
         key = f"{tool}:{list(args.values())[0] if args else ''}"
         if key in self.responses:
             return self.responses[key]
@@ -102,19 +104,19 @@ def test_order_agent_success() -> None:
                     }
                 ],
             },
-            f"get_product_context:{product_id}": {
+            f"get_product_context:{order_id}": {
                 "schema_version": "day09-mcp-evidence-v1",
                 "evidence_ref": "ev_prod_123456789012345678900",
                 "result_hash": "sha256:" + "3" * 64,
                 "domain": "product",
-                "data": {"product_id": product_id, "category": "electronics"},
+                "data": [{"product_id": product_id, "category": "electronics"}],
             },
-            f"get_sellers:{seller_id}": {
+            f"get_sellers:{order_id}": {
                 "schema_version": "day09-mcp-evidence-v1",
                 "evidence_ref": "ev_sell_123456789012345678900",
                 "result_hash": "sha256:" + "4" * 64,
                 "domain": "seller",
-                "data": {"seller_id": seller_id, "city": "sao paulo"},
+                "data": [{"seller_id": seller_id, "city": "sao paulo"}],
             },
         }
 
@@ -136,7 +138,11 @@ def test_order_agent_success() -> None:
             assert result.payload["seller_ids"] == [seller_id]
             assert len(result.payload["orders"]) == 1
             assert len(result.payload["items"]) == 1
-            assert len(result.evidence_refs) >= 2
+            assert result.payload["products"] == [
+                {"product_id": product_id, "category": "electronics"}
+            ]
+            assert result.payload["sellers"] == [{"seller_id": seller_id, "city": "sao paulo"}]
+            assert len(result.evidence_refs) == 4
 
             consumed = [e for e in trace.events if e.get("event_type") == "tool_result_consumed"]
             assert len(consumed) >= 2
@@ -178,6 +184,34 @@ def test_order_agent_permission_rejection() -> None:
                 await c.call("order-agent", "get_policy")
             with pytest.raises(ValueError, match="permission"):
                 await c.call("order-agent", "get_order_payments", order_id="ORDER_A")
+        finally:
+            await c.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("include_product", [True, False])
+def test_context_calls_are_per_order_without_item_identifiers(include_product):
+    async def scenario():
+        gateway = MockGateway()
+        c = await create_collector(gateway)
+        try:
+            task = Task(
+                "CASE_001",
+                "order-agent",
+                "investigate_order",
+                {"case": {"investigation_scope": {"include_product_context": include_product}}},
+                ("ORDER_A", "ORDER_B", "ORDER_A"),
+            )
+            result = await run(task, c)
+            validate_result(task, result, c)
+            assert result.payload["order_ids"] == ["ORDER_A", "ORDER_B"]
+            for tool in ("get_product_context", "get_sellers"):
+                arguments = [args for name, args in gateway.requests if name == tool]
+                expected = [{"order_id": "ORDER_A"}, {"order_id": "ORDER_B"}]
+                if tool == "get_product_context" and not include_product:
+                    expected = []
+                assert arguments == expected
         finally:
             await c.close()
 

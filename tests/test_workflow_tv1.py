@@ -252,7 +252,13 @@ def test_coordinator_invokes_handlers_and_emits_verification_only_after_success(
     asyncio.run(scenario())
 
 
-def test_missing_specialists_fail_before_discovery():
+def test_missing_specialists_fail_before_discovery(monkeypatch):
+    import student_agent.workflow as workflow
+
+    def missing(name):
+        raise ModuleNotFoundError(name=name)
+
+    monkeypatch.setattr(workflow.importlib, "import_module", missing)
     with pytest.raises(RuntimeError, match="Integration incomplete"):
         asyncio.run(solve_case({"case_id": "CASE_001"}, Gateway(), Trace()))
 
@@ -270,15 +276,15 @@ def test_discovery_uses_sdk_pagination_params():
             self.cursors.append(None if params is None else params.cursor)
             if params is None:
                 return SimpleNamespace(
-                    tools=[SimpleNamespace(name='get_order', inputSchema={'type': 'object'})],
-                    nextCursor='page2',
+                    tools=[SimpleNamespace(name="get_order", inputSchema={"type": "object"})],
+                    nextCursor="page2",
                 )
             return SimpleNamespace(
-                tools=[SimpleNamespace(name='get_policy', inputSchema={'type': 'object'})],
+                tools=[SimpleNamespace(name="get_policy", inputSchema={"type": "object"})],
                 nextCursor=None,
             )
 
     session = Session()
     result = asyncio.run(EvidenceGateway(session, Trace().contracts).discover_tools())
-    assert set(result) == {'get_order', 'get_policy'}
-    assert session.cursors == [None, 'page2']
+    assert set(result) == {"get_order", "get_policy"}
+    assert session.cursors == [None, "page2"]
