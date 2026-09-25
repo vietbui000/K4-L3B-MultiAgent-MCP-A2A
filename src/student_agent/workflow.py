@@ -139,4 +139,8 @@ async def coordinate(
 async def solve_case(
     case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
 ) -> dict[str, Any]:
+    # A case without any entity discriminator cannot be investigated safely.
+    # Fail before MCP discovery rather than producing an unverifiable output.
+    if not any(case.get(key) for key in ("order_id", "order_ids", "candidate_order_ids", "customer_unique_id")):
+        raise RuntimeError("Integration incomplete: case has no entity discriminator")
     return await coordinate(case, gateway, trace, load_specialists())
